@@ -88,6 +88,15 @@ tbody tr[data-selected="true"] { background: #14262e; }
 .implied { display: flex; align-items: center; gap: var(--step-2); }
 .implied .num { color: var(--amber); }
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+/* Confidence badge under each protocol name, and the watchlist toggle:
+   high reads are teal, medium amber, low muted, so a reader can tell at a
+   glance which implied values rest on a full record and which on a thin one. */
+.conf { font-size: 11px; letter-spacing: 0.02em; }
+.conf-high { color: var(--positive); }
+.conf-medium { color: var(--amber); }
+.conf-low { color: var(--muted); }
+.wl-toggle { min-height: 36px; padding: 0 14px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); color: var(--ink); white-space: nowrap; }
+.wl-toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #06231f; font-weight: 600; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .status.live::before { background: var(--amber); }
 .rank-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 26px; padding: 0 6px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border); font-family: var(--font-num); font-size: 13px; }

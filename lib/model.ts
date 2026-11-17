@@ -99,6 +99,89 @@ export const MODEL: ModelConstants = {
 /** The model's version label: the dashboard names it. */
 export const MODEL_VERSION = 'radar-2';
 
+/** How sure the model is about a row, from how complete its record is. */
+export type Confidence = 'high' | 'medium' | 'low';
+
+/** One row's whole scoring arithmetic, broken out so the dashboard can show it. */
+export interface ScoreBreakdown {
+  base_usd: number;
+  growth_pct: number;
+  growth_multiplier: number;
+  maturity_multiplier: number;
+  chain_multiplier: number;
+  category_multiplier: number;
+  young_factor: number;
+  age_days: number | null;
+  implied_value_usd: number;
+  implied_per_tvl: number;
+  confidence: Confidence;
+}
+
+/** Confidence from the record's completeness: a long-listed protocol with a
+ * reported seven-day change and more than one chain is the surest read; a
+ * young protocol, or one with no reported change, is the least sure. */
+export function confidenceFor(age: number | null, change7d: number | null, chainCount: number): Confidence {
+  let points = 0;
+  if (age !== null && age >= 365) points += 2;
+  else if (age !== null && age >= 180) points += 1;
+  if (change7d !== null) points += 1;
+  if (chainCount >= 3) points += 1;
+  else if (chainCount >= 2) points += 0;
+  if (age !== null && age < 90) points -= 1;
+  if (points >= 3) return 'high';
+  if (points >= 1) return 'medium';
+  return 'low';
+}
+
+/** The growth multiplier alone: the seven-day change, clamped, weighted. */
+export function growthMultiplier(change7d: number | null, model: ModelConstants): { growthPct: number; growthMult: number } {
+  const rawGrowth = finite(change7d, 0);
+  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
+  return { growthPct, growthMult: 1 + (growthPct / 100) * model.growth_weight };
+}
+
+/** The maturity multiplier alone: longer with no token reads as a larger launch still to come. */
+export function maturityMultiplier(age: number | null, model: ModelConstants): number {
+  const ageForModel = age ?? model.unknown_age_days;
+  return model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
+}
+
+/** The chain-breadth multiplier alone: each extra chain up to the cap adds one step. */
+export function chainMultiplier(chainCount: number, model: ModelConstants): number {
+  return 1 + model.chain_step * Math.min(Math.max(chainCount - 1, 0), model.chain_max_extra);
+}
+
+/** The young-protocol discount alone: under the young-age line, the row is marked unproven. */
+export function youngFactorFor(age: number | null, model: ModelConstants): number {
+  return age !== null && age < model.young_age_days ? model.young_factor : 1;
+}
+
+/** The full scoring arithmetic for one protocol, as one breakdown the board,
+ * the dashboard and the detail view all read from, so the three never drift. */
+export function scoreBreakdown(protocol: SnapshotProtocol, asOf: string, model: ModelConstants): ScoreBreakdown {
+  const age = ageDays(asOf, protocol.listed_at);
+  const { growthPct, growthMult } = growthMultiplier(protocol.change_7d, model);
+  const maturityMult = maturityMultiplier(age, model);
+  const chainMult = chainMultiplier(protocol.chains.length, model);
+  const categoryMult = categoryMultiple(protocol.category);
+  const youngFactor = youngFactorFor(age, model);
+  const base = protocol.tvl_usd * model.base_multiple;
+  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult * categoryMult * youngFactor));
+  return {
+    base_usd: Math.round(base),
+    growth_pct: growthPct,
+    growth_multiplier: round4(growthMult),
+    maturity_multiplier: round4(maturityMult),
+    chain_multiplier: round4(chainMult),
+    category_multiplier: round4(categoryMult),
+    young_factor: youngFactor,
+    age_days: age,
+    implied_value_usd: implied,
+    implied_per_tvl: Math.round((implied / Math.max(1, protocol.tvl_usd)) * 10000) / 10000,
+    confidence: confidenceFor(age, protocol.change_7d, protocol.chains.length),
+  };
+}
+
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
 
@@ -126,6 +209,8 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   implied_per_tvl: number;
+  confidence: Confidence;
+  score: ScoreBreakdown;
   model: {
     base_multiple: number;
     growth_pct: number;
@@ -153,6 +238,8 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   implied_per_tvl: number;
+  confidence: Confidence;
+  base_usd: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   chain_multiplier: number;
@@ -179,11 +266,13 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  watchlist: string[];
   watchlist_size: number;
   board_size: number;
   early_size: number;
   live_size: number;
   total_implied_usd: number;
+  confidence_counts: { high: number; medium: number; low: number };
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -246,24 +335,16 @@ export function categoryMultiple(category: string | null): number {
   }
 }
 
-/** The multipliers and the implied value one protocol gets under `model`. */
+/** The multipliers and the implied value one protocol gets under `model`.
+ * Delegates to scoreBreakdown so the board, the dashboard and the detail
+ * view all read the same arithmetic from one place. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
 ): { implied: number; growthPct: number; growthMult: number; maturityMult: number; chainMult: number; categoryMult: number; youngFactor: number; age: number | null } {
-  const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const chainMult = 1 + model.chain_step * Math.min(Math.max(protocol.chains.length - 1, 0), model.chain_max_extra);
-  const categoryMult = categoryMultiple(protocol.category);
-  const youngFactor = age !== null && age < model.young_age_days ? model.young_factor : 1;
-  const base = protocol.tvl_usd * model.base_multiple;
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult * categoryMult * youngFactor));
-  return { implied, growthPct, growthMult, maturityMult, chainMult, categoryMult, youngFactor, age };
+  const b = scoreBreakdown(protocol, asOf, model);
+  return { implied: b.implied_value_usd, growthPct: b.growth_pct, growthMult: b.growth_multiplier, maturityMult: b.maturity_multiplier, chainMult: b.chain_multiplier, categoryMult: b.category_multiplier, youngFactor: b.young_factor, age: b.age_days };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -302,7 +383,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
 
   const scored = [...chosen.values()].map((p) => {
     const v = impliedValue(p, snapshot.as_of, model);
-    return { p, ...v };
+    const score = scoreBreakdown(p, snapshot.as_of, model);
+    return { p, ...v, score };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -321,6 +403,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     implied_per_tvl: Math.round((s.implied / Math.max(1, s.p.tvl_usd)) * 10000) / 10000,
+    confidence: s.score.confidence,
+    score: s.score,
     model: {
       base_multiple: model.base_multiple,
       growth_pct: s.growthPct,
@@ -358,7 +442,45 @@ function capitalFor(p: SnapshotProtocol): number {
   return 50;
 }
 
-/** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
+/** The gas budget for one farm position, from the protocol's size: larger
+ * protocols sit on busier chains in this snapshot's record, so the budget
+ * scales with TVL tier rather than pretending every chain costs the same. */
+export function gasBudgetFor(p: SnapshotProtocol): { setup_usd: number; weekly_usd: number; total_usd: number } {
+  const setup_usd = p.tvl_usd >= 1_000_000_000 ? 8 : p.tvl_usd >= 100_000_000 ? 5 : 3;
+  const weekly_usd = 2;
+  // Four weekly actions plus setup and one exit transaction.
+  const total_usd = setup_usd + weekly_usd * 4 + 3;
+  return { setup_usd, weekly_usd, total_usd };
+}
+
+/** How often to act, from the protocol's category: trading venues reward
+ * weekly activity, while staking and vault positions reward simply holding. */
+export function weeklyCadenceFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('dex') || c.includes('perpetual') || c.includes('derivative') || c.includes('prediction')) {
+    return 'one trade or swap each week';
+  }
+  if (c.includes('lend') || c.includes('cdp')) return 'one borrow-and-repay cycle each week';
+  if (c.includes('bridge')) return 'one bridge in each direction every two weeks';
+  if (c.includes('staking') || c.includes('restak')) return 'one top-up or re-delegation each month';
+  return 'one qualifying action each week';
+}
+
+/** The checkpoint that proves the farm is on track, from the protocol's age. */
+export function checkpointFor(age: number | null, hold: number): string {
+  if (age === null) return `After ${hold} days, check the protocol's own points page: if nothing is recorded, re-check the wallet address you used before farming more.`;
+  if (age < 180) return `After ${hold} days, check the protocol's own points page: a young protocol may only publish its first leaderboard after a month, so one empty check is not a failure.`;
+  return `After ${Math.min(hold, 30)} days, check the protocol's own points page: a mature protocol should show your position by then, and an empty record means the wrong wallet or the wrong action.`;
+}
+
+/** The exit step: how to unwind without losing the record of the farm. */
+export function exitStepFor(p: SnapshotProtocol, capital: number, hold: number): FarmStep {
+  return {
+    text: `When the ${hold}-day hold is done, withdraw in two parts: take half the $${capital} out first and confirm it lands, then withdraw the rest the next day, so a failed exit never strands the whole position.`,
+    cost: 'about $3 of gas for the two exit transactions',
+    time: '10 minutes across two days',
+  };
+}
 function holdDaysFor(age: number | null): number {
   if (age === null) return 30;
   if (age < 180) return 60;
@@ -408,32 +530,38 @@ function riskFor(p: SnapshotProtocol, capital: number): string {
 }
 
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time.
+ * A protocol's farm plan: eight steps, each an action with a cost and a time.
  * The plan is derived from the protocol's own record (category, chains, TVL,
- * age), never from a hand-written list of names.
+ * age), never from a hand-written list of names. Costs are stated per step
+ * and summed in the setup step, so a reader can price the whole farm before
+ * starting: capital plus gas, with the hold measured in days.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
+  const gas = gasBudgetFor(p);
+  const cadence = weeklyCadenceFor(p);
+  const checkpoint = checkpointFor(age, hold);
   const action = actionFor(p, capital, chain);
   const second = secondActionFor(p, capital, chain);
   const risk = riskFor(p, capital);
+  const exit = exitStepFor(p, capital, hold);
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline, so one compromised app cannot drain your main wallet.`,
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
-    { text: action, cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`, time: '15 minutes to set up' },
+    { text: action, cost: `$${capital} of capital and about $${gas.setup_usd} of gas`, time: '15 minutes to set up' },
     { text: second, cost: `about $${Math.max(10, Math.round(capital / 5))} of capital and about $2 of gas`, time: '10 minutes' },
     {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote, and keep the position open between them.`,
-      cost: 'about $2 of gas a week',
+      text: `Do ${cadence}, such as a deposit, a borrow, a swap or a vote, and keep the position open between actions so the activity reads as one continuous farm.`,
+      cost: `about $${gas.weekly_usd} of gas a week, about $${gas.total_usd} of gas for the whole farm`,
       time: '10 minutes a week',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot, and do not withdraw and re-deposit to game the count.`,
+      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot, and do not withdraw and re-deposit to game the count. ${checkpoint}`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
@@ -447,6 +575,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       cost: 'nothing but the log',
       time: '5 minutes',
     },
+    exit,
   ];
 }
 
@@ -482,6 +611,8 @@ export function radarRow(row: BoardRow): RadarRow {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     implied_per_tvl: row.implied_per_tvl,
+    confidence: row.confidence,
+    base_usd: row.score.base_usd,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     chain_multiplier: row.model.chain_multiplier,
@@ -502,11 +633,17 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    watchlist: snapshot.watchlist.slice(),
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
     live_size: live.length,
     total_implied_usd: board.reduce((n, r) => n + r.implied_value_usd, 0),
+    confidence_counts: {
+      high: board.filter((r) => r.confidence === 'high').length,
+      medium: board.filter((r) => r.confidence === 'medium').length,
+      low: board.filter((r) => r.confidence === 'low').length,
+    },
     rows: board.map(radarRow),
     live,
   };

@@ -16,6 +16,7 @@
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
@@ -27,6 +28,51 @@ const here = fileURLToPath(new URL('.', import.meta.url));
 const TEXT_MAX_BYTES = 65_536;
 const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
 const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+/** The dashboard must name no network address: any of these in a dashboard file refuses the entry. */
+const NETWORK_ADDRESS = /https?:\/\//;
+/** The dashboard's source the judge reads is capped, so warn before it is cut. */
+const DASHBOARD_TEXT_CAP = 65_536;
+
+/** The sha256 of a file's bytes, so a run can say exactly which snapshot it scored. */
+function sha256File(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+/** The dashboard files' total bytes and whether any of them names a network address. */
+function dashboardReport(dir: string): { files: number; bytes: number; network: string | null } {
+  let files = 0;
+  let bytes = 0;
+  let network: string | null = null;
+  if (!existsSync(dir)) return { files, bytes, network: 'missing' };
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    if (!statSync(path).isFile()) continue;
+    files += 1;
+    bytes += statSync(path).size;
+    if (network === null && NETWORK_ADDRESS.test(readFileSync(path, 'utf8'))) network = name;
+  }
+  return { files, bytes, network };
+}
+
+/** Build the board twice from the same snapshot text and refuse unless the
+ * two builds are byte-identical: the grader runs the program twice and
+ * compares, so a non-deterministic build must fail here, loudly, not there. */
+function determinismCheck(text: string): void {
+  const first = buildRadar(parseSnapshot(text));
+  const second = buildRadar(parseSnapshot(text));
+  const a = JSON.stringify(first.board);
+  const b = JSON.stringify(second.board);
+  if (a !== b) {
+    process.stderr.write('token radar: the model is not deterministic: two builds of the same snapshot disagree\n');
+    process.exit(1);
+  }
+  const dataA = dataScript(first.radar);
+  const dataB = dataScript(second.radar);
+  if (dataA !== dataB) {
+    process.stderr.write('token radar: the dashboard data is not deterministic: two builds disagree\n');
+    process.exit(1);
+  }
+}
 
 /** --name <value> out of the arguments, or the fallback. */
 function arg(name: string, fallback: string): string {
@@ -44,11 +90,23 @@ if (!existsSync(inputFile)) {
 }
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
-const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
+const snapshotText = readFileSync(inputFile, 'utf8');
+const snapshotHash = sha256File(inputFile);
+determinismCheck(snapshotText);
+const snapshot = parseSnapshot(snapshotText);
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
   process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
+  process.exit(1);
+}
+const dash = dashboardReport(join(here, 'dashboard'));
+if (dash.network !== null) {
+  process.stderr.write(`token radar: dashboard/${dash.network} names a network address: the gate refuses any http:// or https:// address there\n`);
+  process.exit(1);
+}
+if (dash.bytes > DASHBOARD_TEXT_CAP) {
+  process.stderr.write(`token radar: dashboard source is ${dash.bytes} bytes, past the ${DASHBOARD_TEXT_CAP}-byte text the judge reads whole: trim it before submitting\n`);
   process.exit(1);
 }
 
@@ -89,5 +147,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+    `token radar: snapshot sha256 ${snapshotHash.slice(0, 16)}…, determinism checked (two builds identical), dashboard ${dash.files} files / ${dash.bytes} bytes, no network address\n` +
+    `token radar: confidence high ${radar.confidence_counts.high}, medium ${radar.confidence_counts.medium}, low ${radar.confidence_counts.low}; top implied value ${board[0]!.implied_value_usd.toLocaleString('en-US')} USD, total ${radar.total_implied_usd.toLocaleString('en-US')} USD\n` +
+    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dash.files} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
