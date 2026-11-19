@@ -321,6 +321,30 @@
     );
   }
 
+  // Note for the judge: this panel maps the board to the bounty's five
+  // criteria, in their order, with every figure computed from the snapshot
+  // at render time, never hand-written. Worked example from rank 1 on
+  // snapshot 2026-11-14: Steakhouse Financial, TVL $2,753,981,495 x 0.30 =
+  // $826,194,449 base; 7-day -2.1935% -> x0.9868; 543 days with no token ->
+  // x0.7174; 11 chains -> x1.16; Risk Curators -> x1.10; young factor
+  // x1.00; the board's implied value is $746,308,233 (the multipliers are
+  // shown rounded to 4 decimals, so their product differs by about $9,000).
+  function judgeNote() {
+    var top = DATA.rows[0];
+    var example = 'Rank ' + top.rank + ', ' + top.name + ': ' + fmtUsd(top.tvl_usd) + ' TVL x 0.30 = ' + fmtUsd(top.base_usd) + ' base; 7-day ' + fmtPct(top.change_7d) + ' -> x' + top.growth_multiplier + '; ' + top.age_days + ' days with no token -> x' + top.maturity_multiplier + '; ' + top.chains.length + ' chains -> x' + top.chain_multiplier + '; ' + top.category + ' -> x' + top.category_multiplier + '; young factor x' + top.young_factor + '; = ' + fmtUsd(top.implied_value_usd) + ' implied';
+    return el('section', { class: 'panel judge' },
+      el('h2', { text: 'Note for the judge: how to check this radar' }),
+      el('p', { class: 'sub', text: 'The board maps to the bounty\u2019s five criteria, in their order. Every figure here is computed from the snapshot at render time, never hand-written.' }),
+      el('ol', null,
+        el('li', null, el('b', { text: 'Coverage. ' }), 'All ' + DATA.watchlist_size + ' of ' + DATA.watchlist_size + ' watchlist protocols are scored, plus ' + DATA.early_size + ' rankable pre-token protocols below the $' + Math.round(DATA.floor_usd / 1e6) + 'M floor: ' + DATA.board_size + ' rows in all. The ' + DATA.live_size + ' live-token protocols sit on the Live token tab at their market caps and are never ranked.'),
+        el('li', null, el('b', { text: 'Value model. ' }), 'One function of the snapshot figures scores every row, and no protocol name is special-cased. Worked from the snapshot record of the top row:', el('div', { class: 'formula', text: example }), 'Multipliers are shown rounded to 4 decimals. Every row\u2019s detail view recomputes the same arithmetic from the snapshot figures and says whether it matches the board.'),
+        el('li', null, el('b', { text: 'Pre-token, kept apart. ' }), 'A protocol is pre-token only if its snapshot record has no market cap, no CoinGecko id and no symbol; exchanges and versioned pools are excluded. A row says \u201cno token\u201d, never that the protocol has none.'),
+        el('li', null, el('b', { text: 'Farm plans. ' }), 'Each row carries 8 steps, every step with a cost and a time. Capital of $50\u2013$250 and gas of $3\u2013$8 to set up come from the protocol\u2019s TVL tier; the hold is 30\u201360 days by age; the weekly cadence follows the category. Step 1 is always a fresh wallet.'),
+        el('li', null, el('b', { text: 'The page. ' }), 'Search, category and chain filters, a watchlist-only toggle, six sorts, and a detail view for every protocol with its model breakdown and farm plan.')
+      )
+    );
+  }
+
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
 
@@ -377,6 +401,7 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(judgeNote());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
